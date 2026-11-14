@@ -10,7 +10,7 @@ const { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 3000;
 const MAX_PLAYERS = 8;
 const MAPS = 11; // total maps in game.html: 0-8 normal, 9-10 = Christmas maps
-const CAR_TYPES = 31; // number of buyable vehicles (keep equal to the car list in cars.js): 28 + 3 Christmas cars
+const CAR_TYPES = 39; // number of buyable vehicles (keep equal to the car list in cars.js): 28 + 3 Christmas cars + 8 new cars
 // CHRISTMAS EVENT: maps 9 and 10 are only offered 1 Dec 2026 - 3 Jan 2027 (Italy time). Set the env var XMAS_FORCE=1 on Render to test them any time.
 const XMAS_MAPS = [9, 10];
 const xmasOn = () => {
@@ -30,7 +30,23 @@ const MOVE_EPS = 3;                                                             
 const validElo = (v) => Math.max(0, Math.min(9999, (+v) | 0));
 const validCar = (v) => Math.max(0, Math.min(CAR_TYPES - 1, (+v) | 0));
 const validWrap = (v) => (/^[a-z0-9_-]{1,40}$/i.test(String(v || '')) ? String(v) : '');
+const validDev = (v) => (['pc', 'phone', 'tablet', 'pad'].includes(v) ? v : 'pc'); // shown as an icon on the nametag: PC / iPhone / iPad / Xbox controller
 let nextPub = 1;
+
+// ---- region shown at the top-left of the game. Set REGION on Render (e.g. "Frankfurt, DE") or it is detected from this server's public IP ----
+let REGION = String(process.env.REGION || '').slice(0, 40);
+async function detectRegion() {
+  if (REGION) return;
+  const tryUrl = async (url, pick) => {
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 4000);
+    try { const j = await (await fetch(url, { signal: ac.signal })).json(); return pick(j); } catch { return ''; } finally { clearTimeout(t); }
+  };
+  const r = (await tryUrl('https://ipwho.is/', (j) => (j && j.success !== false && j.city ? j.city + ', ' + (j.country_code || '') : ''))) ||
+            (await tryUrl('https://ipapi.co/json/', (j) => (j && j.city ? j.city + ', ' + (j.country_code || '') : '')));
+  REGION = String(r || '').replace(/,\s*$/, '').slice(0, 40);
+  if (REGION) console.log('Server region: ' + REGION);
+}
+detectRegion();
 
 // addresses other devices on the same Wi-Fi/LAN can use (virtual adapters are skipped, Wi-Fi first)
 const VIRTUAL = /vethernet|virtualbox|vmware|vmnet|docker|veth|br-|utun|awdl|llw|bridge|tailscale|zerotier|hyper-v|wsl/i;
@@ -76,6 +92,7 @@ const server = http.createServer((req, res) => {
       res.end(data);
     });
   }
+  if (p === '/info') return json(res, { region: REGION || 'Unknown', t: Date.now() });
   if (p === '/lan') return json(res, lanUrls());
   if (p === '/admin/api' && req.method === 'POST') {
     let body = '';
@@ -172,7 +189,7 @@ const broadcast = (room, o, exceptId) => {
 };
 const roster = (room) => {
   const players = {};
-  for (const [id, p] of room.players) players[id] = { name: p.name, slot: p.slot, car: p.car, wrap: p.wrap || '', elo: p.elo };
+  for (const [id, p] of room.players) players[id] = { name: p.name, slot: p.slot, car: p.car, wrap: p.wrap || '', elo: p.elo, dev: p.dev || 'pc' };
   return { t: 'players', host: room.host, players };
 };
 const num = (v) => (Number.isFinite(+v) ? +v : 0);
@@ -212,9 +229,9 @@ wss.on('connection', (ws) => {
       const used = new Set([...r.players.values()].map((p) => p.slot));
       let slot = 0; while (used.has(slot)) slot++;
       id = String(nextId++); room = r;
-      r.players.set(id, { ws, name: String(m.name || 'Player').slice(0, 12), slot, car: validCar(m.car), wrap: validWrap(m.wrap), elo: validElo(m.elo), score: 0, prog: 0, fin: null, ax: null, az: null, moved: Date.now() });
+      r.players.set(id, { ws, name: String(m.name || 'Player').slice(0, 12), slot, car: validCar(m.car), wrap: validWrap(m.wrap), elo: validElo(m.elo), dev: validDev(m.dev), score: 0, prog: 0, fin: null, ax: null, az: null, moved: Date.now() });
       if (!r.host) r.host = id;
-      send(ws, { t: 'welcome', id, slot, code: r.name, pub: r.pub, phase: r.state, left: Math.max(0, r.endsAt - Date.now()), maps: r.maps, votes: voteCounts(r) });
+      send(ws, { t: 'welcome', id, slot, region: REGION, code: r.name, pub: r.pub, phase: r.state, left: Math.max(0, r.endsAt - Date.now()), maps: r.maps, votes: voteCounts(r) });
       broadcast(r, roster(r));
     } else if (!room) {
       return;
@@ -247,6 +264,10 @@ wss.on('connection', (ws) => {
         room.finOrder.push(id); p.fin = num(m.time);
         send(ws, { t: 'result', pos: room.finOrder.length, total: room.raceIds.size });
       }
+    } else if (m.t === 'ping') {
+      send(ws, { t: 'pong', n: num(m.n), region: REGION });
+    } else if (m.t === 'dev') {
+      const p = room.players.get(id); if (p) { p.dev = validDev(m.dev); broadcast(room, roster(room)); }
     } else if (m.t === 'elo') {
       const p = room.players.get(id); if (p) { p.elo = validElo(m.elo); broadcast(room, roster(room)); }
     } else if (m.t === 'car') {
